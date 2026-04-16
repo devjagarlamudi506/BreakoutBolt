@@ -69,6 +69,8 @@ class MarketDataCollector:
                 relative_volume=max(rel_vol, 0.1),
                 avg_daily_volume=float(volume.mean() * 390),
                 intraday_volume=float(volume.sum()),
+                bar_high=float(last["high"]),
+                bar_low=float(last["low"]),
             )
         except Exception as exc:
             logger.warning("Polygon fetch failed for %s: %s", symbol, exc)

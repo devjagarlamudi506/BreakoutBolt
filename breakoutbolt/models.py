@@ -29,6 +29,8 @@ class SymbolSnapshot:
     relative_volume: float
     avg_daily_volume: float
     intraday_volume: float
+    bar_high: float = 0.0
+    bar_low: float = 0.0
 
     @property
     def dollar_volume(self) -> float:
