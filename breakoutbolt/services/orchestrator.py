@@ -72,10 +72,12 @@ class BreakoutBoltOrchestrator:
             for symbol, pos in open_positions.items():
                 snap = exit_snaps.get(symbol)
                 if not snap:
+                    logger.warning("No market data for open position %s — exit check skipped", symbol)
                     continue
                 should_exit, event = self.tracker.evaluate_exit(pos, snap)
                 if should_exit:
                     self.store.close_position(symbol, status=event)
+                    self.cache.should_suppress_signal(symbol)  # prevent re-entry this cycle
                     await self.alerts.send(self.alerts.format_exit(pos, event))
                     scan_stats["exits"] += 1
 
@@ -113,19 +115,28 @@ class BreakoutBoltOrchestrator:
                 logger.info("Suppressed duplicate signal for %s", symbol)
                 continue
 
-            order = self.execution.submit_entry(signal)
-            self.store.log_order(symbol, signal.side.value, 1.0, "market", order.status, order.broker_order_id)
+            qty = self.risk_manager.calculate_qty(signal)
+            order = self.execution.submit_entry(signal, qty=qty)
+            self.store.log_order(symbol, signal.side.value, qty, "market", order.status, order.broker_order_id)
             if order.status in {"SUBMITTED", "PAPER_SIMULATED"}:
                 pos = Position(
                     symbol=symbol,
                     side=signal.side,
-                    qty=1.0,
+                    qty=qty,
                     entry=signal.entry,
                     stop_loss=signal.stop_loss,
                     target=signal.target,
                     opened_at=datetime.utcnow(),
                     status="OPEN",
                     broker_order_id=order.broker_order_id,
+                    pattern=signal.pattern.value,
+                    confidence=signal.confidence,
+                    entry_vwap=snap.vwap,
+                    entry_premarket_high=snap.premarket_high,
+                    entry_trend_score=snap.trend_score,
+                    entry_momentum_score=snap.momentum_score,
+                    entry_relative_volume=snap.relative_volume,
+                    entry_reason=signal.reason,
                 )
                 self.store.open_position(pos)
                 await self.alerts.send(self.alerts.format_signal(signal, merged_note))

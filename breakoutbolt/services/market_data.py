@@ -72,7 +72,7 @@ class MarketDataCollector:
             )
         except Exception as exc:
             logger.warning("Polygon fetch failed for %s: %s", symbol, exc)
-            return self._mock_snapshot(symbol)
+            return None
 
     def _mock_snapshot(self, symbol: str) -> SymbolSnapshot:
         # Fallback keeps the system testable without external APIs.

@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     min_relative_volume: float = 1.5
     min_reward_to_risk: float = 2.0
     max_active_positions: int = 5
+    risk_per_trade: float = 200.0  # Max dollars risked per trade (entry - stop) * qty
+    max_position_value: float = 5000.0  # Max dollar value of any single position
     watchlist: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["NVDA", "TSLA", "AMD", "MSFT", "AAPL"]
     )

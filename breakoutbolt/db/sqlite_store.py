@@ -109,8 +109,12 @@ class SQLiteStore:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO positions(symbol, side, qty, entry, stop_loss, target, opened_at, status, broker_order_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO positions(
+                    symbol, side, qty, entry, stop_loss, target, opened_at, status, broker_order_id,
+                    pattern, confidence, entry_vwap, entry_premarket_high,
+                    entry_trend_score, entry_momentum_score, entry_relative_volume, entry_reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pos.symbol,
@@ -122,6 +126,14 @@ class SQLiteStore:
                     pos.opened_at.isoformat(),
                     pos.status,
                     pos.broker_order_id,
+                    pos.pattern,
+                    pos.confidence,
+                    pos.entry_vwap,
+                    pos.entry_premarket_high,
+                    pos.entry_trend_score,
+                    pos.entry_momentum_score,
+                    pos.entry_relative_volume,
+                    pos.entry_reason,
                 ),
             )
 

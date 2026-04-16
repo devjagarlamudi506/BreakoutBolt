@@ -60,3 +60,11 @@ class Position:
     opened_at: datetime
     status: str = "OPEN"
     broker_order_id: str | None = None
+    pattern: str | None = None
+    confidence: float | None = None
+    entry_vwap: float | None = None
+    entry_premarket_high: float | None = None
+    entry_trend_score: float | None = None
+    entry_momentum_score: float | None = None
+    entry_relative_volume: float | None = None
+    entry_reason: str | None = None

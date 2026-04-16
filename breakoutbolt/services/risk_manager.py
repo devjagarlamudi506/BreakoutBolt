@@ -8,6 +8,16 @@ class RiskManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    def calculate_qty(self, signal: TradeSignal) -> float:
+        """Risk-based position sizing: risk_per_trade / per_share_risk, capped by max_position_value."""
+        per_share_risk = abs(signal.entry - signal.stop_loss)
+        if per_share_risk < 0.01:
+            return 1.0
+        qty_by_risk = self.settings.risk_per_trade / per_share_risk
+        qty_by_value = self.settings.max_position_value / signal.entry if signal.entry > 0 else 1.0
+        qty = min(qty_by_risk, qty_by_value)
+        return max(1.0, float(int(qty)))  # whole shares, minimum 1
+
     def approve(self, signal: TradeSignal, active_positions_count: int) -> tuple[bool, str]:
         if signal.side == SignalSide.HOLD:
             return False, "HOLD signal"

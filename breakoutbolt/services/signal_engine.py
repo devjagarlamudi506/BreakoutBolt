@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from breakoutbolt.config import Settings
 from breakoutbolt.models import PatternType, SignalSide, SymbolSnapshot, TradeSignal
+
+logger = logging.getLogger(__name__)
 
 
 class SignalEngine:
@@ -16,8 +19,8 @@ class SignalEngine:
         if snap.relative_volume < self.settings.min_relative_volume:
             return self._hold(snap.symbol, "Relative volume filter failed")
 
-        breakout = self._breakout_continuation(snap)
-        pullback = self._pullback_to_vwap(snap)
+        breakout, bo_fails = self._breakout_continuation(snap)
+        pullback, pb_fails = self._pullback_to_vwap(snap)
 
         if breakout and not pullback:
             return breakout
@@ -27,14 +30,24 @@ class SignalEngine:
             if breakout.confidence >= pullback.confidence:
                 return breakout
             return pullback
-        return self._hold(snap.symbol, "No clean pattern")
 
-    def _breakout_continuation(self, s: SymbolSnapshot) -> TradeSignal | None:
+        fails = bo_fails + pb_fails
+        reason = f"No clean pattern ({', '.join(fails)})" if fails else "No clean pattern"
+        return self._hold(snap.symbol, reason)
+
+    def _breakout_continuation(self, s: SymbolSnapshot) -> tuple[TradeSignal | None, list[str]]:
+        fails: list[str] = []
         above_vwap = s.last_price > s.vwap
         breaking_high = s.last_price >= s.premarket_high * 0.998
         trend_ok = s.trend_score > 0.008 and s.momentum_score > 0.2
-        if not (above_vwap and breaking_high and trend_ok):
-            return None
+        if not above_vwap:
+            fails.append("BO:below_vwap")
+        if not breaking_high:
+            fails.append(f"BO:below_premarket_high({s.last_price:.2f}<{s.premarket_high * 0.998:.2f})")
+        if not trend_ok:
+            fails.append(f"BO:weak_trend(trend={s.trend_score:.4f},mom={s.momentum_score:.4f})")
+        if fails:
+            return None, fails
 
         entry = s.last_price
         stop = min(s.vwap * 0.998, entry * 0.992)
@@ -52,14 +65,21 @@ class SignalEngine:
             confidence=conf,
             reason="Breakout continuation above VWAP and premarket high",
             timestamp=datetime.utcnow(),
-        )
+        ), []
 
-    def _pullback_to_vwap(self, s: SymbolSnapshot) -> TradeSignal | None:
+    def _pullback_to_vwap(self, s: SymbolSnapshot) -> tuple[TradeSignal | None, list[str]]:
+        fails: list[str] = []
         strong_trend = s.trend_score > 0.01 and s.momentum_score > 0.1
         near_vwap = abs(s.last_price - s.vwap) / max(s.vwap, 1e-9) <= 0.004
         reclaiming = s.last_price >= s.vwap
-        if not (strong_trend and near_vwap and reclaiming):
-            return None
+        if not strong_trend:
+            fails.append(f"PB:weak_trend(trend={s.trend_score:.4f},mom={s.momentum_score:.4f})")
+        if not near_vwap:
+            fails.append(f"PB:far_from_vwap({abs(s.last_price - s.vwap) / max(s.vwap, 1e-9):.4f}>0.004)")
+        if not reclaiming:
+            fails.append("PB:below_vwap")
+        if fails:
+            return None, fails
 
         entry = s.last_price
         stop = s.vwap * 0.996
@@ -77,7 +97,7 @@ class SignalEngine:
             confidence=conf,
             reason="Pullback to VWAP in strong uptrend with momentum persistence",
             timestamp=datetime.utcnow(),
-        )
+        ), []
 
     def _hold(self, symbol: str, reason: str) -> TradeSignal:
         return TradeSignal(

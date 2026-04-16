@@ -50,7 +50,15 @@ CREATE TABLE IF NOT EXISTS positions (
     opened_at TEXT NOT NULL,
     closed_at TEXT,
     status TEXT NOT NULL,
-    broker_order_id TEXT
+    broker_order_id TEXT,
+    pattern TEXT,
+    confidence REAL,
+    entry_vwap REAL,
+    entry_premarket_high REAL,
+    entry_trend_score REAL,
+    entry_momentum_score REAL,
+    entry_relative_volume REAL,
+    entry_reason TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_symbol_open ON positions(symbol) WHERE status = 'OPEN';
