@@ -38,12 +38,12 @@ class SignalEngine:
     def _breakout_continuation(self, s: SymbolSnapshot) -> tuple[TradeSignal | None, list[str]]:
         fails: list[str] = []
         above_vwap = s.last_price > s.vwap
-        breaking_high = s.last_price >= s.premarket_high * 0.998
-        trend_ok = s.trend_score > 0.008 and s.momentum_score > 0.2
+        breaking_high = s.last_price >= s.premarket_high * 0.995
+        trend_ok = s.trend_score > 0.005 and s.momentum_score > 0.003
         if not above_vwap:
             fails.append("BO:below_vwap")
         if not breaking_high:
-            fails.append(f"BO:below_premarket_high({s.last_price:.2f}<{s.premarket_high * 0.998:.2f})")
+            fails.append(f"BO:below_premarket_high({s.last_price:.2f}<{s.premarket_high * 0.995:.2f})")
         if not trend_ok:
             fails.append(f"BO:weak_trend(trend={s.trend_score:.4f},mom={s.momentum_score:.4f})")
         if fails:
@@ -69,13 +69,13 @@ class SignalEngine:
 
     def _pullback_to_vwap(self, s: SymbolSnapshot) -> tuple[TradeSignal | None, list[str]]:
         fails: list[str] = []
-        strong_trend = s.trend_score > 0.01 and s.momentum_score > 0.1
-        near_vwap = abs(s.last_price - s.vwap) / max(s.vwap, 1e-9) <= 0.004
-        reclaiming = s.last_price >= s.vwap
+        strong_trend = s.trend_score > 0.005 and s.momentum_score > 0.003
+        near_vwap = abs(s.last_price - s.vwap) / max(s.vwap, 1e-9) <= 0.008
+        reclaiming = s.last_price >= s.vwap * 0.998  # within 0.2% below VWAP is OK
         if not strong_trend:
             fails.append(f"PB:weak_trend(trend={s.trend_score:.4f},mom={s.momentum_score:.4f})")
         if not near_vwap:
-            fails.append(f"PB:far_from_vwap({abs(s.last_price - s.vwap) / max(s.vwap, 1e-9):.4f}>0.004)")
+            fails.append(f"PB:far_from_vwap({abs(s.last_price - s.vwap) / max(s.vwap, 1e-9):.4f}>0.008)")
         if not reclaiming:
             fails.append("PB:below_vwap")
         if fails:

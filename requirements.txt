@@ -6,3 +6,4 @@ pandas==2.3.1
 numpy==2.3.2
 alpaca-py==0.42.1
 python-dotenv==1.1.1
+websockets>=13.0

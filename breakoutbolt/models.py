@@ -34,7 +34,8 @@ class SymbolSnapshot:
 
     @property
     def dollar_volume(self) -> float:
-        return self.last_price * self.intraday_volume
+        vol = max(self.intraday_volume, self.avg_daily_volume)
+        return self.last_price * vol
 
 
 @dataclass(slots=True)

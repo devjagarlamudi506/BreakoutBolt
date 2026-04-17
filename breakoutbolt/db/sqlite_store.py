@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from breakoutbolt.models import Position, SignalSide, SymbolSnapshot, TradeSignal
@@ -27,6 +27,11 @@ class SQLiteStore:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.executescript(Path(self.schema_path).read_text(encoding="utf-8"))
+            # Migrate: add trading_date column if missing
+            for table in ("scan_snapshots", "signals", "orders"):
+                cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+                if "trading_date" not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN trading_date TEXT NOT NULL DEFAULT ''")
 
     def seed_watchlist(self, symbols: list[str]) -> None:
         now = datetime.utcnow().isoformat()
@@ -59,14 +64,15 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO scan_snapshots(
-                    symbol, ts, last_price, vwap, premarket_high,
+                    symbol, ts, trading_date, last_price, vwap, premarket_high,
                     trend_score, momentum_score, relative_volume,
                     intraday_volume, avg_daily_volume, dollar_volume
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snap.symbol,
                     snap.timestamp.isoformat(),
+                    date.today().isoformat(),
                     snap.last_price,
                     snap.vwap,
                     snap.premarket_high,
@@ -84,14 +90,15 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO signals(
-                    symbol, ts, side, pattern, entry, stop_loss,
+                    symbol, ts, trading_date, side, pattern, entry, stop_loss,
                     target, reward_to_risk, confidence, reason,
                     ai_approved, ai_note
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sig.symbol,
                     sig.timestamp.isoformat(),
+                    date.today().isoformat(),
                     sig.side.value,
                     sig.pattern.value,
                     sig.entry,
@@ -147,7 +154,10 @@ class SQLiteStore:
     def get_open_positions(self) -> list[Position]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT symbol, side, qty, entry, stop_loss, target, opened_at, status, broker_order_id FROM positions WHERE status = 'OPEN'"
+                """SELECT symbol, side, qty, entry, stop_loss, target, opened_at, status, broker_order_id,
+                          pattern, confidence, entry_vwap, entry_premarket_high,
+                          entry_trend_score, entry_momentum_score, entry_relative_volume, entry_reason
+                   FROM positions WHERE status = 'OPEN'"""
             ).fetchall()
         results: list[Position] = []
         for row in rows:
@@ -162,6 +172,14 @@ class SQLiteStore:
                     opened_at=datetime.fromisoformat(row[6]),
                     status=row[7],
                     broker_order_id=row[8],
+                    pattern=row[9],
+                    confidence=row[10],
+                    entry_vwap=row[11],
+                    entry_premarket_high=row[12],
+                    entry_trend_score=row[13],
+                    entry_momentum_score=row[14],
+                    entry_relative_volume=row[15],
+                    entry_reason=row[16],
                 )
             )
         return results
@@ -178,20 +196,21 @@ class SQLiteStore:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO orders(symbol, side, qty, order_type, status, broker_order_id, submitted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO orders(symbol, side, qty, order_type, status, broker_order_id, submitted_at, trading_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (symbol, side, qty, order_type, status, broker_order_id, datetime.utcnow().isoformat()),
+                (symbol, side, qty, order_type, status, broker_order_id, datetime.utcnow().isoformat(), date.today().isoformat()),
             )
 
     def clear_daily_data(self) -> None:
-        """Delete intraday snapshots, signals, and orders. Close any leftover open positions."""
+        """Close leftover open positions and prune data older than 5 days."""
         now = datetime.utcnow().isoformat()
+        cutoff = (date.today() - timedelta(days=5)).isoformat()
         with self._conn() as conn:
             conn.execute("UPDATE positions SET status = 'EOD_CLOSED', closed_at = ? WHERE status = 'OPEN'", (now,))
-            conn.execute("DELETE FROM scan_snapshots")
-            conn.execute("DELETE FROM signals")
-            conn.execute("DELETE FROM orders")
+            conn.execute("DELETE FROM scan_snapshots WHERE trading_date < ?", (cutoff,))
+            conn.execute("DELETE FROM signals WHERE trading_date < ?", (cutoff,))
+            conn.execute("DELETE FROM orders WHERE trading_date < ?", (cutoff,))
 
     def get_recent_signals(self, limit: int = 50) -> list[dict]:
         with self._conn() as conn:

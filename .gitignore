@@ -15,6 +15,7 @@ build/
 
 # Logs
 .run/
+logs/
 
 # IDE
 .vscode/

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 import numpy as np
@@ -11,12 +13,19 @@ from breakoutbolt.config import Settings
 
 logger = logging.getLogger(__name__)
 
+# Polygon Starter plan: ~5 requests/second. Use 4/sec to leave headroom.
+_POLYGON_MAX_PER_SEC = 4
+
 
 class UniverseSelector:
     """Multi-factor universe selector: relative volume, ATR%, momentum, gap screening."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._pg_timestamps: list[float] = []
+        self._pg_lock = asyncio.Lock()
+        self._http: httpx.AsyncClient | None = None
+        self.daily_volumes: dict[str, float] = {}
 
     async def build_watchlist(self) -> list[str]:
         if not self.settings.dynamic_watchlist_enabled:
@@ -45,8 +54,14 @@ class UniverseSelector:
         prev_day = self._previous_trading_day()
         lookback_start = prev_day - timedelta(days=30)  # ~20 trading days
 
-        # Fetch grouped daily for the previous session (all tickers, one call).
-        latest_bars = await self._fetch_grouped_daily(prev_day)
+        # During market hours, fetch TODAY's running intraday aggregates so the
+        # watchlist evolves with real-time volume and price action.  Fall back to
+        # the previous session when the market is closed (e.g. pre-market).
+        today = date.today()
+        latest_bars = await self._fetch_grouped_daily(today)
+        if not latest_bars:
+            logger.info("No intraday data for today yet, falling back to previous day")
+            latest_bars = await self._fetch_grouped_daily(prev_day)
         if not latest_bars:
             return []
 
@@ -77,8 +92,8 @@ class UniverseSelector:
             return []
 
         # Narrow to top candidates by dollar volume before fetching history.
-        # This prevents thousands of API calls on the free tier.
-        shortlist_size = self.settings.watchlist_size * 5  # e.g. 150 for top 30
+        # At ~4 req/sec rate limit, 60 symbols ≈ 15 seconds — acceptable.
+        shortlist_size = min(self.settings.watchlist_size * 2, 60)  # e.g. 60 for top 30
         sorted_by_dv = sorted(candidates.keys(), key=lambda s: candidates[s]["dollar_volume"], reverse=True)
         shortlist = sorted_by_dv[:shortlist_size]
         logger.info("Shortlisted %d tickers for history fetch", len(shortlist))
@@ -101,8 +116,13 @@ class UniverseSelector:
             volumes = np.array([b["v"] for b in bars], dtype=float)
 
             # --- Factor 1: Relative volume (prev day vs 20-day avg) ---
+            # Normalize for time-of-day: at 9:45 ET only ~15 min of volume exists.
             avg_vol = float(np.mean(volumes)) if len(volumes) > 0 else 1.0
-            rel_vol = latest["volume"] / max(avg_vol, 1.0)
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+            minutes_in = max((now_et.hour * 60 + now_et.minute) - (9 * 60 + 30), 1)
+            day_fraction = min(minutes_in / 390, 1.0)
+            proportional_avg = avg_vol * day_fraction
+            rel_vol = latest["volume"] / max(proportional_avg, 1.0)
 
             # --- Factor 2: ATR% (14-period ATR as % of price) ---
             tr = np.maximum(
@@ -146,6 +166,7 @@ class UniverseSelector:
 
         scored.sort(key=lambda x: x[1], reverse=True)
         top = [s for s, _ in scored[: self.settings.watchlist_size]]
+        self.daily_volumes = {s: candidates[s]["volume"] for s in top if s in candidates}
         logger.info(
             "Scored %d candidates, top 5: %s",
             len(scored),
@@ -157,6 +178,29 @@ class UniverseSelector:
     # Polygon API helpers
     # ------------------------------------------------------------------
 
+    async def _get_http(self) -> httpx.AsyncClient:
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.AsyncClient(timeout=15.0)
+        return self._http
+
+    async def close(self) -> None:
+        if self._http and not self._http.is_closed:
+            await self._http.aclose()
+
+    async def _acquire_polygon_token(self) -> None:
+        """Sliding-window rate limiter: max _POLYGON_MAX_PER_SEC calls per second."""
+        async with self._pg_lock:
+            now = time.monotonic()
+            cutoff = now - 1.0
+            self._pg_timestamps = [t for t in self._pg_timestamps if t > cutoff]
+            if len(self._pg_timestamps) >= _POLYGON_MAX_PER_SEC:
+                wait = self._pg_timestamps[0] - cutoff
+                if wait > 0:
+                    logger.debug("Polygon rate limit: waiting %.2fs", wait)
+                    await asyncio.sleep(wait)
+                    self._pg_timestamps = [t for t in self._pg_timestamps if t > time.monotonic() - 1.0]
+            self._pg_timestamps.append(time.monotonic())
+
     @staticmethod
     def _previous_trading_day() -> date:
         d = date.today() - timedelta(days=1)
@@ -165,13 +209,14 @@ class UniverseSelector:
         return d
 
     async def _fetch_grouped_daily(self, target_date: date) -> list[dict]:
+        await self._acquire_polygon_token()
         base = self.settings.polygon_base_url.rstrip("/")
         url = f"{base}/v2/aggs/grouped/locale/us/market/stocks/{target_date.isoformat()}"
         params = {"adjusted": "true", "apiKey": self.settings.polygon_api_key}
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            payload = resp.json()
+        client = await self._get_http()
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        payload = resp.json()
         results = payload.get("results", [])
         logger.info("Grouped daily returned %d tickers for %s", len(results), target_date)
         return results
@@ -179,22 +224,24 @@ class UniverseSelector:
     async def _fetch_daily_history(
         self, symbols: list[str], start: date, end: date
     ) -> dict[str, list[dict]]:
-        """Fetch 20-day daily bars for each symbol. Batched with concurrency limit."""
-        sem = asyncio.Semaphore(10)  # max 10 concurrent requests
+        """Fetch 20-day daily bars for each symbol. Rate-limited to Polygon Starter plan."""
         base = self.settings.polygon_base_url.rstrip("/")
+        client = await self._get_http()
+        out: dict[str, list[dict]] = {}
 
-        async def _fetch_one(symbol: str) -> tuple[str, list[dict]]:
+        for symbol in symbols:
+            await self._acquire_polygon_token()
             url = f"{base}/v2/aggs/ticker/{symbol}/range/1/day/{start.isoformat()}/{end.isoformat()}"
             params = {"adjusted": "true", "sort": "asc", "limit": 30, "apiKey": self.settings.polygon_api_key}
-            async with sem:
-                try:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.get(url, params=params)
-                        resp.raise_for_status()
-                        return symbol, resp.json().get("results", [])
-                except Exception as exc:
-                    logger.debug("History fetch failed for %s: %s", symbol, exc)
-                    return symbol, []
+            try:
+                resp = await client.get(url, params=params)
+                if resp.status_code == 429:
+                    logger.warning("Polygon rate-limited on %s, skipping remaining history", symbol)
+                    break
+                resp.raise_for_status()
+                out[symbol] = resp.json().get("results", [])
+            except Exception as exc:
+                logger.debug("History fetch failed for %s: %s", symbol, exc)
+                out[symbol] = []
 
-        results = await asyncio.gather(*[_fetch_one(s) for s in symbols])
-        return dict(results)
+        return out

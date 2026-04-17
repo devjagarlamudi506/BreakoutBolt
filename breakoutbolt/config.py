@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     scan_interval_seconds: int = 30
     market_open_hour_et: int = 9
+    market_open_minute_et: int = 30
     market_close_hour_et: int = 16
 
     min_dollar_volume: float = 5_000_000
@@ -56,6 +57,10 @@ class Settings(BaseSettings):
 
     polygon_api_key: str = ""
     polygon_base_url: str = "https://api.polygon.io"
+
+    finnhub_api_key: str = ""  # Finnhub free tier: real-time WS trades (50 symbols) + Quote (60/min)
+
+    websocket_exit_enabled: bool = False  # Enable Alpaca IEX WebSocket for real-time exit monitoring
 
     discord_webhook_url: str = ""
 

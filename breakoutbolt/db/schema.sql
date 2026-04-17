@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS scan_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
     ts TEXT NOT NULL,
+    trading_date TEXT NOT NULL DEFAULT '',
     last_price REAL NOT NULL,
     vwap REAL NOT NULL,
     premarket_high REAL NOT NULL,
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
     ts TEXT NOT NULL,
+    trading_date TEXT NOT NULL DEFAULT '',
     side TEXT NOT NULL,
     pattern TEXT NOT NULL,
     entry REAL NOT NULL,
@@ -71,5 +73,6 @@ CREATE TABLE IF NOT EXISTS orders (
     order_type TEXT NOT NULL,
     status TEXT NOT NULL,
     broker_order_id TEXT,
-    submitted_at TEXT NOT NULL
+    submitted_at TEXT NOT NULL,
+    trading_date TEXT NOT NULL DEFAULT ''
 );
