@@ -197,21 +197,44 @@ class WsDataFeed:
     # ------------------------------------------------------------------
 
     def get_snapshot(self, symbol: str) -> SymbolSnapshot | None:
-        """Build a SymbolSnapshot from accumulated real-time bars."""
-        bars = self._bars.get(symbol)
-        if not bars:
+        """Build a SymbolSnapshot from accumulated real-time bars.
+
+        Falls back to a minimal snapshot from the live (partial) bar
+        when no completed bars exist yet.
+        """
+        last_price = self._latest_price.get(symbol)
+        if last_price is None:
             return None
 
-        closes = np.array([b["c"] for b in bars], dtype=float)
-        highs = np.array([b["h"] for b in bars], dtype=float)
-        lows = np.array([b["l"] for b in bars], dtype=float)
-        volumes = np.array([b["v"] for b in bars], dtype=float)
-        vwaps = np.array([b.get("vw", b["c"]) for b in bars], dtype=float)
+        bars = self._bars.get(symbol, [])
+
+        # Include the in-progress bar so we have data even before the first
+        # minute boundary completes.
+        live_builder = self._builders.get(symbol)
+        if live_builder and live_builder.volume > 0:
+            live_bar = {
+                "o": live_builder.open,
+                "h": live_builder.high,
+                "l": live_builder.low,
+                "c": live_builder.close,
+                "v": live_builder.volume,
+                "vw": live_builder.vwap_num / max(live_builder.volume, 1e-9),
+            }
+            all_bars = bars + [live_bar]
+        else:
+            all_bars = bars
+
+        if not all_bars:
+            return None
+
+        closes = np.array([b["c"] for b in all_bars], dtype=float)
+        highs = np.array([b["h"] for b in all_bars], dtype=float)
+        lows = np.array([b["l"] for b in all_bars], dtype=float)
+        volumes = np.array([b["v"] for b in all_bars], dtype=float)
+        vwaps = np.array([b.get("vw", b["c"]) for b in all_bars], dtype=float)
 
         total_vol = float(volumes.sum())
         day_vwap = float((vwaps * volumes).sum() / max(total_vol, 1.0))
-
-        last_price = self._latest_price.get(symbol, float(closes[-1]))
 
         # Trend: intraday return from first bar to current
         trend_score = float((last_price / closes[0]) - 1) if closes[0] > 0 else 0.0
@@ -227,7 +250,47 @@ class WsDataFeed:
         else:
             rel_vol = 1.5  # not enough bars yet; use neutral default
 
-        last_bar = bars[-1]
+        last_bar = all_bars[-1]
+
+        # Multi-bar context for signal quality
+        bar_count = len(all_bars)
+
+        # Consecutive green/red bars (close > open = green)
+        consecutive_green = 0
+        consecutive_red = 0
+        for b in reversed(all_bars):
+            if b["c"] > b["o"]:
+                if consecutive_red == 0:
+                    consecutive_green += 1
+                else:
+                    break
+            elif b["c"] < b["o"]:
+                if consecutive_green == 0:
+                    consecutive_red += 1
+                else:
+                    break
+            else:
+                break
+
+        # ATR: average true range of last 14 bars
+        if len(all_bars) >= 2:
+            trs = []
+            for i in range(1, min(15, len(all_bars))):
+                prev_c = all_bars[i - 1]["c"]
+                curr_h = all_bars[i]["h"]
+                curr_l = all_bars[i]["l"]
+                tr = max(curr_h - curr_l, abs(curr_h - prev_c), abs(curr_l - prev_c))
+                trs.append(tr)
+            atr = float(np.mean(trs)) if trs else 0.0
+        else:
+            atr = float(all_bars[0]["h"] - all_bars[0]["l"])
+
+        # Volume surge: last bar volume vs average bar volume
+        if bar_count >= 5:
+            avg_bar_vol = float(volumes[:-1].mean()) if len(volumes) > 1 else 1.0
+            vol_surge = float(volumes[-1] / max(avg_bar_vol, 1.0))
+        else:
+            vol_surge = 1.0
 
         return SymbolSnapshot(
             symbol=symbol,
@@ -242,12 +305,16 @@ class WsDataFeed:
             intraday_volume=total_vol,
             bar_high=float(last_bar.get("h", last_price)),
             bar_low=float(last_bar.get("l", last_price)),
+            bar_count=bar_count,
+            consecutive_green_bars=consecutive_green,
+            consecutive_red_bars=consecutive_red,
+            atr=atr,
+            volume_surge=vol_surge,
         )
 
     def has_data(self, symbol: str) -> bool:
-        """True if at least one completed bar exists for the symbol."""
-        bars = self._bars.get(symbol)
-        return bars is not None and len(bars) >= 1
+        """True if we have any real-time price for the symbol."""
+        return symbol in self._latest_price
 
     def clear_day(self) -> None:
         """Clear accumulated bars at end of day."""

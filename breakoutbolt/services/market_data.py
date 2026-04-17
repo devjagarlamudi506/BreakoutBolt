@@ -38,9 +38,9 @@ class MarketDataCollector:
         if self._http and not self._http.is_closed:
             await self._http.aclose()
 
-    async def fetch_snapshots(self, symbols: list[str]) -> dict[str, SymbolSnapshot | None]:
+    async def fetch_snapshots(self, symbols: list[str], *, skip_finnhub: bool = False) -> dict[str, SymbolSnapshot | None]:
         """Fetch snapshots for all symbols concurrently."""
-        tasks = {symbol: self.fetch_snapshot(symbol) for symbol in symbols}
+        tasks = {symbol: self.fetch_snapshot(symbol, skip_finnhub=skip_finnhub) for symbol in symbols}
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         out: dict[str, SymbolSnapshot | None] = {}
         for symbol, result in zip(tasks.keys(), results):
@@ -51,12 +51,12 @@ class MarketDataCollector:
                 out[symbol] = result
         return out
 
-    async def fetch_snapshot(self, symbol: str) -> SymbolSnapshot | None:
+    async def fetch_snapshot(self, symbol: str, *, skip_finnhub: bool = False) -> SymbolSnapshot | None:
         if not self.polygon_api_key and not self.finnhub_api_key:
             return self._mock_snapshot(symbol)
 
         # Try Finnhub Quote first (real-time, 60 calls/min)
-        if self.finnhub_api_key:
+        if self.finnhub_api_key and not skip_finnhub:
             snap = await self._fetch_finnhub_quote(symbol)
             if snap:
                 return snap

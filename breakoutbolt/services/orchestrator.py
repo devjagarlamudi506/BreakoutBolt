@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from breakoutbolt.config import Settings
 from breakoutbolt.db.sqlite_store import SQLiteStore
-from breakoutbolt.models import Position
+from breakoutbolt.models import Position, SignalSide
 from breakoutbolt.services.ai_review import AIReviewLayer
 from breakoutbolt.services.alert_dispatcher import AlertDispatcher
 from breakoutbolt.services.execution import OrderExecutionService
@@ -64,6 +64,11 @@ class BreakoutBoltOrchestrator:
         return open_minutes <= now_minutes < close_minutes
 
     async def scan_once(self) -> dict:
+        # Double-check market is open before scanning (defense against pre-market entries)
+        if not self.market_is_open():
+            logger.warning("scan_once called outside market hours — skipping")
+            return {"symbols": 0, "signals": 0, "entries": 0, "exits": 0}
+
         await self.refresh_watchlist_if_due()
         watchlist = self.store.get_watchlist()
         if not watchlist:
@@ -83,8 +88,9 @@ class BreakoutBoltOrchestrator:
                     continue
                 should_exit, event = self.tracker.evaluate_exit(pos, snap)
                 if should_exit:
+                    exit_price = snap.last_price
                     await self.execution.submit_exit(symbol, pos.qty)
-                    self.store.close_position(symbol, status=event)
+                    self.store.close_position(symbol, status=event, exit_price=exit_price)
                     self.cache.should_suppress_signal(symbol)  # prevent re-entry this cycle
                     await self.alerts.send(self.alerts.format_exit(pos, event))
                     scan_stats["exits"] += 1
@@ -103,10 +109,13 @@ class BreakoutBoltOrchestrator:
                         continue
                 fallback_symbols.append(symbol)
             if fallback_symbols:
-                polygon_snaps = await self.data_collector.fetch_snapshots(fallback_symbols)
+                logger.info("WS data: %d/%d symbols, REST fallback for %d: %s",
+                            len(watchlist) - len(fallback_symbols), len(watchlist),
+                            len(fallback_symbols), fallback_symbols[:10])
+                polygon_snaps = await self.data_collector.fetch_snapshots(fallback_symbols, skip_finnhub=True)
                 all_snaps.update({s: v for s, v in polygon_snaps.items() if v})
-            logger.debug("Scan data: %d real-time, %d Polygon fallback",
-                         len(watchlist) - len(fallback_symbols), len(fallback_symbols))
+            else:
+                logger.debug("WS data: all %d symbols covered, 0 REST calls", len(watchlist))
         else:
             all_snaps = await self.data_collector.fetch_snapshots(watchlist)
 
@@ -127,7 +136,12 @@ class BreakoutBoltOrchestrator:
                 continue
 
             signal = self.signal_engine.evaluate(snap)
-            approved_risk, risk_note = self.risk_manager.approve(signal, len(open_positions))
+
+            # Deduplicate BUY signals — skip if same symbol+pattern seen recently
+            if signal.side == SignalSide.BUY and self.cache.suppress_buy_signal(symbol, signal.pattern.value):
+                continue
+
+            approved_risk, risk_note = self.risk_manager.approve(signal, len(open_positions), open_symbols=set(open_positions.keys()))
             approved_ai, ai_note = self.ai_review.review(signal)
 
             final_approved = approved_risk and approved_ai
@@ -194,9 +208,46 @@ class BreakoutBoltOrchestrator:
                 await self.ws_data_feed.update_subscriptions(candidates)
             logger.info("Watchlist refreshed with %s symbols", len(candidates))
 
+    def _is_eod_flat_time(self) -> bool:
+        """Return True if it's 3:55 ET or later (time to flatten all positions)."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        return now.hour * 60 + now.minute >= 15 * 60 + 55  # 15:55 ET
+
+    async def _close_all_eod(self) -> None:
+        """Submit sell orders for all open positions and mark them EOD_CLOSED with P&L."""
+        open_positions = self.store.get_open_positions()
+        if not open_positions:
+            return
+        # Fetch last prices for exit_price tracking
+        symbols = [p.symbol for p in open_positions]
+        if self.ws_data_feed:
+            snaps = {}
+            fallback = []
+            for sym in symbols:
+                if self.ws_data_feed.has_data(sym):
+                    snap = self.ws_data_feed.get_snapshot(sym)
+                    if snap:
+                        snaps[sym] = snap
+                        continue
+                fallback.append(sym)
+            if fallback:
+                rest_snaps = await self.data_collector.fetch_snapshots(fallback, skip_finnhub=True)
+                snaps.update({s: v for s, v in rest_snaps.items() if v})
+        else:
+            snaps = await self.data_collector.fetch_snapshots(symbols)
+
+        for pos in open_positions:
+            await self.execution.submit_exit(pos.symbol, pos.qty)
+            snap = snaps.get(pos.symbol)
+            exit_price = snap.last_price if snap else None
+            self.store.close_position(pos.symbol, status="EOD_CLOSED", exit_price=exit_price)
+            await self.alerts.send(self.alerts.format_exit(pos, "EOD_CLOSED"))
+            logger.info("EOD flat: sold %s qty=%.0f exit_price=%s", pos.symbol, pos.qty, exit_price)
+
     async def run_forever(self) -> None:
         watchlist_ready = False
         daily_cleared = False
+        eod_flattened = False
         while True:
             loop_start = time.monotonic()
             try:
@@ -205,8 +256,13 @@ class BreakoutBoltOrchestrator:
                     if not watchlist_ready:
                         await self.refresh_watchlist_if_due(force=True)
                         watchlist_ready = True
+                        eod_flattened = False
                         logger.info("Initial watchlist refresh done, scanning starts next cycle")
-                    else:
+                    elif self._is_eod_flat_time() and not eod_flattened:
+                        await self._close_all_eod()
+                        eod_flattened = True
+                        logger.info("EOD flatten complete — no new scans until tomorrow")
+                    elif not eod_flattened:
                         stats = await self.scan_once()
                         elapsed = time.monotonic() - loop_start
                         logger.info("Scan complete (%.1fs): %s", elapsed, stats)

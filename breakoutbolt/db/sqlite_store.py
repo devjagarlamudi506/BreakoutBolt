@@ -32,6 +32,12 @@ class SQLiteStore:
                 cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
                 if "trading_date" not in cols:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN trading_date TEXT NOT NULL DEFAULT ''")
+            # Migrate: add exit_price / realized_pnl to positions if missing
+            pos_cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
+            if "exit_price" not in pos_cols:
+                conn.execute("ALTER TABLE positions ADD COLUMN exit_price REAL")
+            if "realized_pnl" not in pos_cols:
+                conn.execute("ALTER TABLE positions ADD COLUMN realized_pnl REAL")
 
     def seed_watchlist(self, symbols: list[str]) -> None:
         now = datetime.utcnow().isoformat()
@@ -144,12 +150,20 @@ class SQLiteStore:
                 ),
             )
 
-    def close_position(self, symbol: str, status: str = "CLOSED") -> None:
+    def close_position(self, symbol: str, status: str = "CLOSED", exit_price: float | None = None) -> None:
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE positions SET status = ?, closed_at = ? WHERE symbol = ? AND status = 'OPEN'",
-                (status, datetime.utcnow().isoformat(), symbol),
-            )
+            if exit_price is not None:
+                row = conn.execute("SELECT entry, qty FROM positions WHERE symbol = ? AND status = 'OPEN'", (symbol,)).fetchone()
+                realized_pnl = (exit_price - row[0]) * row[1] if row else None
+                conn.execute(
+                    "UPDATE positions SET status = ?, closed_at = ?, exit_price = ?, realized_pnl = ? WHERE symbol = ? AND status = 'OPEN'",
+                    (status, datetime.utcnow().isoformat(), exit_price, realized_pnl, symbol),
+                )
+            else:
+                conn.execute(
+                    "UPDATE positions SET status = ?, closed_at = ? WHERE symbol = ? AND status = 'OPEN'",
+                    (status, datetime.utcnow().isoformat(), symbol),
+                )
 
     def get_open_positions(self) -> list[Position]:
         with self._conn() as conn:
@@ -207,7 +221,21 @@ class SQLiteStore:
         now = datetime.utcnow().isoformat()
         cutoff = (date.today() - timedelta(days=5)).isoformat()
         with self._conn() as conn:
-            conn.execute("UPDATE positions SET status = 'EOD_CLOSED', closed_at = ? WHERE status = 'OPEN'", (now,))
+            # Close open positions with last known price as exit_price
+            open_rows = conn.execute(
+                "SELECT symbol, entry, qty FROM positions WHERE status = 'OPEN'"
+            ).fetchall()
+            for symbol, entry, qty in open_rows:
+                snap_row = conn.execute(
+                    "SELECT last_price FROM scan_snapshots WHERE symbol = ? ORDER BY ts DESC LIMIT 1",
+                    (symbol,),
+                ).fetchone()
+                exit_price = snap_row[0] if snap_row else None
+                realized_pnl = (exit_price - entry) * qty if exit_price else None
+                conn.execute(
+                    "UPDATE positions SET status = 'EOD_CLOSED', closed_at = ?, exit_price = ?, realized_pnl = ? WHERE symbol = ? AND status = 'OPEN'",
+                    (now, exit_price, realized_pnl, symbol),
+                )
             conn.execute("DELETE FROM scan_snapshots WHERE trading_date < ?", (cutoff,))
             conn.execute("DELETE FROM signals WHERE trading_date < ?", (cutoff,))
             conn.execute("DELETE FROM orders WHERE trading_date < ?", (cutoff,))

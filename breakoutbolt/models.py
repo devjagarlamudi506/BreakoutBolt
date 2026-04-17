@@ -31,6 +31,12 @@ class SymbolSnapshot:
     intraday_volume: float
     bar_high: float = 0.0
     bar_low: float = 0.0
+    # Multi-bar context for signal quality
+    bar_count: int = 0
+    consecutive_green_bars: int = 0
+    consecutive_red_bars: int = 0
+    atr: float = 0.0  # Average True Range of recent bars
+    volume_surge: float = 1.0  # current bar volume / avg bar volume
 
     @property
     def dollar_volume(self) -> float:
@@ -71,3 +77,5 @@ class Position:
     entry_momentum_score: float | None = None
     entry_relative_volume: float | None = None
     entry_reason: str | None = None
+    exit_price: float | None = None
+    realized_pnl: float | None = None

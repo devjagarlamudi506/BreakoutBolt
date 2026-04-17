@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS positions (
     entry_trend_score REAL,
     entry_momentum_score REAL,
     entry_relative_volume REAL,
-    entry_reason TEXT
+    entry_reason TEXT,
+    exit_price REAL,
+    realized_pnl REAL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_symbol_open ON positions(symbol) WHERE status = 'OPEN';

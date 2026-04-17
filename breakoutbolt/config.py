@@ -18,11 +18,14 @@ class Settings(BaseSettings):
     market_close_hour_et: int = 16
 
     min_dollar_volume: float = 5_000_000
-    min_relative_volume: float = 1.5
-    min_reward_to_risk: float = 2.0
+    min_relative_volume: float = 2.0
+    min_reward_to_risk: float = 2.5
     max_active_positions: int = 5
     risk_per_trade: float = 200.0  # Max dollars risked per trade (entry - stop) * qty
     max_position_value: float = 5000.0  # Max dollar value of any single position
+    min_confidence: float = 0.75  # Minimum confidence score to enter a trade
+    max_daily_loss: float = 500.0  # Stop trading after this much realized loss in a day
+    no_trade_before_minutes_et: int = 15  # Minutes after open to wait (9:30 + 15 = 9:45)
     watchlist: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["NVDA", "TSLA", "AMD", "MSFT", "AAPL"]
     )

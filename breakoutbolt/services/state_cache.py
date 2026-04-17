@@ -48,3 +48,15 @@ class StateCache:
             return True
         self.set_json(key, {"symbol": symbol, "ts": int(time.time())}, ttl_sec=minutes * 60)
         return False
+
+    def suppress_buy_signal(self, symbol: str, pattern: str, minutes: int = 5) -> bool:
+        """Suppress duplicate BUY signals for the same symbol+pattern within a window.
+
+        Returns True if the signal should be suppressed (already seen recently).
+        """
+        key = f"buy_dedup:{symbol}:{pattern}"
+        existing = self.get_json(key)
+        if existing:
+            return True
+        self.set_json(key, {"symbol": symbol, "pattern": pattern, "ts": int(time.time())}, ttl_sec=minutes * 60)
+        return False

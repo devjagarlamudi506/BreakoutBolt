@@ -3,6 +3,10 @@ from __future__ import annotations
 from breakoutbolt.config import Settings
 from breakoutbolt.models import SignalSide, TradeSignal
 
+# Inverse/leveraged ETF pairs — these move opposite to the market/sector
+INVERSE_ETFS = {"SQQQ", "SOXS", "SPXS", "SDOW", "TZA", "SH", "PSQ", "DOG", "RWM"}
+LONG_LEVERAGED_ETFS = {"TQQQ", "SOXL", "SPXL", "UDOW", "TNA", "TSLL", "IBIT"}
+
 
 class RiskManager:
     def __init__(self, settings: Settings) -> None:
@@ -18,7 +22,7 @@ class RiskManager:
         qty = min(qty_by_risk, qty_by_value)
         return max(1.0, float(int(qty)))  # whole shares, minimum 1
 
-    def approve(self, signal: TradeSignal, active_positions_count: int) -> tuple[bool, str]:
+    def approve(self, signal: TradeSignal, active_positions_count: int, open_symbols: set[str] | None = None) -> tuple[bool, str]:
         if signal.side == SignalSide.HOLD:
             return False, "HOLD signal"
         if signal.entry <= 0 or signal.stop_loss <= 0 or signal.target <= 0:
@@ -29,4 +33,15 @@ class RiskManager:
             return False, "Reward-to-risk below threshold"
         if active_positions_count >= self.settings.max_active_positions:
             return False, "Max active positions reached"
+
+        # Directional consistency: block inverse ETFs when holding long, and vice versa
+        if open_symbols:
+            is_inverse = signal.symbol in INVERSE_ETFS
+            has_long = bool(open_symbols - INVERSE_ETFS)
+            has_inverse = bool(open_symbols & INVERSE_ETFS)
+            if is_inverse and has_long:
+                return False, "Directional conflict: inverse ETF while holding longs"
+            if not is_inverse and has_inverse:
+                return False, "Directional conflict: long while holding inverse ETF"
+
         return True, "Risk approved"

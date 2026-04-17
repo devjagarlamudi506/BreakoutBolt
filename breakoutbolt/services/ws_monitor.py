@@ -130,7 +130,7 @@ class WebSocketExitMonitor:
             # Submit sell order to broker before updating DB.
             if self.execution:
                 await self.execution.submit_exit(symbol, pos.qty)
-            self.store.close_position(symbol, status=event)
+            self.store.close_position(symbol, status=event, exit_price=price)
             self.cache.should_suppress_signal(symbol)
             await self.alerts.send(self.alerts.format_exit(pos, event))
             # Remove from local tracking and unsubscribe.
